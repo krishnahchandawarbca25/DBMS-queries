@@ -1,0 +1,71 @@
+# @makoai/app-sdk
+
+The runtime SDK for [Mako](https://mako.ai) data apps — React hooks over an
+app's data bindings, plus a Vite plugin that serves those bindings during a
+local `vite dev`.
+
+Every Mako workspace repository carries this package at `packages/app-sdk`;
+apps depend on it with `"@makoai/app-sdk": "file:../../packages/app-sdk"`. Mako
+keeps the vendored copy current — do not edit it in a workspace repo.
+
+## In the app
+
+```tsx
+import { useQuery, useDuckDB, useSearchParams, useTheme } from "@makoai/app-sdk";
+
+// Rows of bindings/<name>.sql, materialized to parquet by Mako.
+const { data, loading, error } = useQuery("latest_sales");
+
+// Analytical SQL over every binding (DuckDB-WASM in the browser; table
+// names are binding names).
+const totals = useDuckDB("select country, sum(revenue) r from latest_sales group by 1");
+
+// Rematerialize on demand: re-runs the binding's query on the warehouse,
+// then every hook reading it re-renders with the new rows. The old rows
+// stay on screen while `refreshing` is true.
+const { refresh, refreshing } = useQuery("latest_sales");
+<button onClick={() => refresh().catch(e => alert(e.message))} disabled={refreshing}>
+  Refresh
+</button>
+```
+
+`useDuckDB(...).refresh()` refreshes every binding; `refreshBinding(name)` /
+`refreshBindings()` do the same outside a component. A refresh POSTs to
+`__data/<name>/refresh`, the data URL's sibling, so whoever serves the app's
+data (Mako, the sandbox dev server, the Vite plugin below) rebuilds it with
+its own authorization: a signed-in member can always refresh; a public share
+only when its owner enabled live queries, and at most once every few minutes
+per binding. A refused refresh rejects with `status` (403, 429 + `retryAfterMs`)
+or 502 with the query's error.
+
+`useLocation` / `useSearchParams` / `navigate` keep filter state in the URL;
+`useTheme` follows the OS preference. Theme tokens (`--background`,
+`--chart-1`, …) match the ones the scaffold's `styles.css` declares.
+
+Data arrives from `__data/<name>.parquet`, relative to the page — the same
+path in Mako's sandbox, in a published app, and on a laptop.
+
+## In `vite.config.ts`
+
+```ts
+import { makoData } from "@makoai/app-sdk/vite";
+
+export default defineConfig({ plugins: [react(), makoData()] });
+```
+
+`makoData()` answers `__data/index.json` (the app's `bindings/*.sql`) and
+`__data/<name>.parquet` during `vite dev` by streaming each binding's
+materialized artifact from the Mako API — a binding that was never
+materialized is built on first request, and `POST __data/<name>/refresh`
+(the SDK's `refresh()`) rebuilds one on demand. Results are cached under
+`node_modules/.mako-data/` for five minutes (`?refresh` bypasses; a stale
+copy is served if the API is unreachable). It is `apply: "serve"` only —
+production builds never load it.
+
+Credentials, in order: `MAKO_API_URL` / `MAKO_API_KEY` in the environment,
+then in the repo-root `.env`. The workspace id comes from
+`.mako/workspace.json` (or `MAKO_WORKSPACE_ID`). Without a key the app runs
+and every binding answers `503` with a hint.
+
+Dependency-free: the DuckDB engine loads from jsDelivr at runtime; the plugin
+uses only Node built-ins.
